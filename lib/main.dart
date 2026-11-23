@@ -2,7 +2,11 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:crypto/crypto.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:firebase_core/firebase_core.dart';
+import 'package:firebase_storage/firebase_storage.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:flutter_quill/flutter_quill.dart' as q;
@@ -18,6 +22,10 @@ import 'package:video_player/video_player.dart';
 
 const kAdminPass = 'hamzanjar8000.H';
 const kVaultPass = 'hamzanjar8000.H80008000';
+const kDomain = '@riwaya.app';
+
+final db = FirebaseFirestore.instance;
+final auth = FirebaseAuth.instance;
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -26,12 +34,12 @@ Future<void> main() async {
 }
 
 class S extends ChangeNotifier {
-  static final S i = S._(); S._();
+  static final S i = S._();
+  S._();
   static late SharedPreferences p;
 
   static Future<void> init() async {
     p = await SharedPreferences.getInstance();
-    i.userId = p.getString('session') ?? '';
     i.seedIdx = p.getInt('seed') ?? 0;
     i.baseFont = p.getDouble('font') ?? 18;
     i.aiProvider = p.getString('ai_p') ?? 'https://api.openai.com/v1';
@@ -40,90 +48,123 @@ class S extends ChangeNotifier {
     i.wikiSite = p.getString('w_s') ?? 'ar.wikisource.org';
     i.wikiUser = p.getString('w_u') ?? '';
     i.wikiPass = p.getString('w_p') ?? '';
-    if (i.userId.isNotEmpty) { final u = i.users()[i.userId]; i.userName = u?['name'] ?? ''; i.bio = u?['bio'] ?? ''; i.avatar = u?['avatar'] ?? ''; }
+    try {
+      await Firebase.initializeApp();
+      final u = auth.currentUser;
+      if (u != null) await i.loadProfile(u.uid);
+    } catch (_) {}
     unawaited(Gal.sync());
   }
 
-  int seedIdx = 0; double baseFont = 18;
+  int seedIdx = 0;
+  double baseFont = 18;
   String aiProvider = '', aiModel = '', aiKey = '';
   String wikiSite = '', wikiUser = '', wikiPass = '';
-  String userId = '', userName = '', bio = '', avatar = '';
+  String uid = '', handle = '', name = '', bio = '', avatar = '';
   bool admin = false;
-  bool get logged => userId.isNotEmpty;
+
+  bool get logged => uid.isNotEmpty;
   Color get seed => seeds[seedIdx % seeds.length];
 
   Future<void> savePrefs() async {
-    await p.setInt('seed', seedIdx); await p.setDouble('font', baseFont);
-    await p.setString('ai_p', aiProvider); await p.setString('ai_m', aiModel); await p.setString('ai_k', aiKey);
-    await p.setString('w_s', wikiSite); await p.setString('w_u', wikiUser); await p.setString('w_p', wikiPass);
+    await p.setInt('seed', seedIdx);
+    await p.setDouble('font', baseFont);
+    await p.setString('ai_p', aiProvider);
+    await p.setString('ai_m', aiModel);
+    await p.setString('ai_k', aiKey);
+    await p.setString('w_s', wikiSite);
+    await p.setString('w_u', wikiUser);
+    await p.setString('w_p', wikiPass);
     notifyListeners();
   }
 
-  Map<String, dynamic> users() { final r = p.getString('users'); return r == null ? {} : Map<String, dynamic>.from(jsonDecode(r)); }
-  static String h(String x) => sha256.convert(utf8.encode(x)).toString();
-
-  Future<String?> signUp(String id, String name, String pass) async {
-    final c = id.trim().toLowerCase().replaceAll(' ', '');
-    if (c.length < 3) return 'المعرّف قصير';
-    final u = users(); if (u.containsKey(c)) return 'المعرّف مستخدم';
-    u[c] = {'name': name.trim(), 'pass': h(pass), 'bio': '', 'avatar': ''};
-    await p.setString('users', jsonEncode(u));
-    return login(c, pass);
-  }
-
-  Future<String?> login(String id, String pass) async {
-    final c = id.trim().toLowerCase().replaceAll(' ', '');
-    final u = users()[c];
-    if (u == null) return 'لا يوجد حساب';
-    if (u['pass'] != h(pass)) return 'كلمة المرور خاطئة';
-    userId = c; userName = u['name'] ?? c; bio = u['bio'] ?? ''; avatar = u['avatar'] ?? '';
-    await p.setString('session', c); notifyListeners(); return null;
-  }
-
-  Future<void> logout() async { userId = ''; admin = false; await p.remove('session'); notifyListeners(); }
-
-  Future<void> profile({String? name, String? b, String? av}) async {
-    final u = users(); final me = u[userId]; if (me == null) return;
-    if (name != null) me['name'] = name;
-    if (b != null) me['bio'] = b;
-    if (av != null) me['avatar'] = av;
-    await p.setString('users', jsonEncode(u));
-    userName = me['name'] ?? ''; bio = me['bio'] ?? ''; avatar = me['avatar'] ?? '';
+  Future<void> loadProfile(String id) async {
+    final d = await db.collection('users').doc(id).get();
+    final m = d.data() ?? {};
+    uid = id;
+    handle = m['handle'] ?? '';
+    name = m['name'] ?? '';
+    bio = m['bio'] ?? '';
+    avatar = m['avatar'] ?? '';
     notifyListeners();
   }
 
-  List<MapEntry<String, dynamic>> search(String t) {
-    final s = t.trim().toLowerCase();
-    return users().entries.where((e) => e.key != userId && (s.isEmpty || e.key.contains(s) || (e.value['name'] as String).toLowerCase().contains(s))).toList();
+  Future<String?> signUp(String h, String nm, String pass) async {
+    final hl = h.trim().toLowerCase().replaceAll(' ', '');
+    if (!RegExp(r'^[a-z0-9_]{3,20}$').hasMatch(hl)) return 'المعرّف: 3-20 حرفاً لاتينياً أو رقماً';
+    if (pass.length < 6) return 'كلمة المرور 6 أحرف على الأقل';
+    if (nm.trim().isEmpty) return 'أدخل اسماً';
+    final ex = await db.collection('users').where('handle', isEqualTo: hl).limit(1).get();
+    if (ex.docs.isNotEmpty) return 'المعرّف محجوز';
+    try {
+      final c = await auth.createUserWithEmailAndPassword(email: '$hl$kDomain', password: pass);
+      await db.collection('users').doc(c.user!.uid).set({'handle': hl, 'name': nm.trim(), 'bio': '', 'avatar': ''});
+      await loadProfile(c.user!.uid);
+      return null;
+    } on FirebaseAuthException catch (e) {
+      return e.code == 'email-already-in-use' ? 'المعرّف محجوز' : 'تعذر إنشاء الحساب (${e.code})';
+    } catch (_) { return 'تعذر الاتصال'; }
   }
 
-  List<String> friends() => p.getStringList('f_$userId') ?? [];
-  List<String> reqs() => p.getStringList('r_$userId') ?? [];
-
-  Future<void> sendReq(String id) async {
-    final r = p.getStringList('r_$id') ?? [];
-    if (!r.contains(userId)) { r.add(userId); await p.setStringList('r_$id', r); }
+  Future<String?> login(String h, String pass) async {
+    final hl = h.trim().toLowerCase().replaceAll(' ', '');
+    try {
+      final c = await auth.signInWithEmailAndPassword(email: '$hl$kDomain', password: pass);
+      await loadProfile(c.user!.uid);
+      return null;
+    } on FirebaseAuthException catch (e) {
+      if (e.code == 'user-not-found') return 'لا يوجد حساب';
+      if (e.code == 'wrong-password' || e.code == 'invalid-credential') return 'كلمة المرور خاطئة';
+      return 'تعذر الدخول (${e.code})';
+    } catch (_) { return 'تعذر الاتصال'; }
   }
 
-  Future<void> accept(String id) async {
-    final r = reqs()..remove(id); await p.setStringList('r_$userId', r);
-    await p.setStringList('f_$userId', [...friends(), id]);
-    await p.setStringList('f_$id', [...(p.getStringList('f_$id') ?? []), userId]);
+  Future<void> logout() async {
+    try { await auth.signOut(); } catch (_) {}
+    uid = ''; handle = ''; name = ''; bio = ''; avatar = ''; admin = false;
     notifyListeners();
   }
 
-  Future<void> reject(String id) async { final r = reqs()..remove(id); await p.setStringList('r_$userId', r); notifyListeners(); }
+  Future<void> profile({String? nm, String? b}) async {
+    if (nm != null) name = nm;
+    if (b != null) bio = b;
+    notifyListeners();
+    await db.collection('users').doc(uid).update({'name': name, 'bio': bio});
+  }
 
-  String get nKey => admin ? 'an' : 'nv_$userId';
+  Future<void> uploadAvatar(File f) async {
+    final r = FirebaseStorage.instance.ref('avatars/$uid/a.jpg');
+    await r.putFile(f);
+    final url = await r.getDownloadURL();
+    avatar = url;
+    notifyListeners();
+    await db.collection('users').doc(uid).update({'avatar': url});
+  }
+
+  Future<void> sendReq(String targetUid, String myHandle, String myName) async {
+    await db.collection('users').doc(targetUid).collection('requests').doc(uid).set({'handle': myHandle, 'name': myName});
+  }
+
+  Future<void> accept(String fromUid, String fromHandle, String fromName) async {
+    await db.collection('users').doc(uid).collection('friends').doc(fromUid).set({'handle': fromHandle, 'name': fromName});
+    await db.collection('users').doc(fromUid).collection('friends').doc(uid).set({'handle': handle, 'name': name});
+    await db.collection('users').doc(uid).collection('requests').doc(fromUid).delete();
+  }
+
+  Future<void> reject(String fromUid) async {
+    await db.collection('users').doc(uid).collection('requests').doc(fromUid).delete();
+  }
+
+  static String chatId(String a, String b) => a.compareTo(b) < 0 ? '${a}_$b' : '${b}_$a';
+
+  String get nKey => admin ? 'an' : 'nv_$uid';
   List<Novel> novels() { final r = p.getString(nKey); if (r == null) return []; return (jsonDecode(r) as List).map((e) => Novel.fromJson(Map<String, dynamic>.from(e))).toList(); }
-
   Future<void> saveNovel(Novel n) async {
     final l = novels(); final i = l.indexWhere((e) => e.id == n.id);
     i < 0 ? l.insert(0, n) : l[i] = n;
     await p.setString(nKey, jsonEncode(l.map((e) => e.toJson()).toList()));
     notifyListeners();
   }
-
   Future<void> delNovel(String id) async {
     final l = novels()..removeWhere((e) => e.id == id);
     await p.setString(nKey, jsonEncode(l.map((e) => e.toJson()).toList()));
@@ -269,10 +310,11 @@ class Login extends StatefulWidget {
 
 class _LoginState extends State<Login> {
   final _id = TextEditingController(), _name = TextEditingController(), _pass = TextEditingController();
-  bool _up = false; String? _e;
+  bool _up = false, _busy = false; String? _e;
   Future<void> _go() async {
+    setState(() { _busy = true; _e = null; });
     final e = _up ? await S.i.signUp(_id.text, _name.text, _pass.text) : await S.i.login(_id.text, _pass.text);
-    if (mounted) setState(() => _e = e);
+    if (mounted) setState(() { _e = e; _busy = false; });
   }
   @override
   Widget build(BuildContext c) {
@@ -290,7 +332,7 @@ class _LoginState extends State<Login> {
       TextField(controller: _pass, obscureText: true, decoration: const InputDecoration(hintText: 'كلمة المرور', prefixIcon: Icon(Icons.lock_outline))),
       if (_e != null) Padding(padding: const EdgeInsets.only(top: 12), child: Text(_e!, style: const TextStyle(color: Colors.redAccent))),
       const SizedBox(height: 20),
-      SizedBox(width: double.infinity, child: FilledButton(onPressed: _go, child: Text(_up ? 'إنشاء حساب' : 'تسجيل دخول'))),
+      SizedBox(width: double.infinity, child: FilledButton(onPressed: _busy ? null : _go, child: Text(_busy ? '…' : (_up ? 'إنشاء حساب' : 'تسجيل دخول')))),
       TextButton(onPressed: () => setState(() { _up = !_up; _e = null; }), child: Text(_up ? 'عندي حساب' : 'إنشاء حساب جديد')),
     ])))));
   }
@@ -317,11 +359,11 @@ class Home extends StatelessWidget {
           GestureDetector(
             onTap: () => Navigator.of(c).push(MaterialPageRoute(builder: (_) => const Profile())),
             child: Row(children: [
-              CircleAvatar(radius: 26, backgroundColor: p.primaryContainer, backgroundImage: S.i.avatar.isNotEmpty ? FileImage(File(S.i.avatar)) : null, child: S.i.avatar.isEmpty ? Icon(Icons.person, color: p.primary) : null),
+              CircleAvatar(radius: 26, backgroundColor: p.primaryContainer, backgroundImage: S.i.avatar.isNotEmpty ? NetworkImage(S.i.avatar) : null, child: S.i.avatar.isEmpty ? Icon(Icons.person, color: p.primary) : null),
               const SizedBox(width: 12),
               Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                Text(S.i.userName, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
-                Text('@${S.i.userId}', style: TextStyle(color: p.onSurfaceVariant)),
+                Text(S.i.name, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+                Text('@${S.i.handle}', style: TextStyle(color: p.onSurfaceVariant)),
               ]),
             ]),
           ),
@@ -357,17 +399,20 @@ class Profile extends StatelessWidget {
     final p = Theme.of(c).colorScheme;
     return Scaffold(appBar: AppBar(title: const Text('ملفي')), body: AnimatedBuilder(animation: S.i, builder: (_, __) => ListView(padding: const EdgeInsets.all(20), children: [
       Center(child: Stack(children: [
-        CircleAvatar(radius: 56, backgroundColor: p.primaryContainer, backgroundImage: S.i.avatar.isNotEmpty ? FileImage(File(S.i.avatar)) : null, child: S.i.avatar.isEmpty ? Icon(Icons.person, size: 46, color: p.primary) : null),
+        CircleAvatar(radius: 56, backgroundColor: p.primaryContainer, backgroundImage: S.i.avatar.isNotEmpty ? NetworkImage(S.i.avatar) : null, child: S.i.avatar.isEmpty ? Icon(Icons.person, size: 46, color: p.primary) : null),
         Positioned(bottom: 0, right: 0, child: IconButton.filled(icon: const Icon(Icons.edit, size: 16), onPressed: () async {
           final a = await pickAsset(c, false);
           final f = await a?.file;
-          if (f != null) await S.i.profile(av: f.path);
+          if (f == null) return;
+          if (!c.mounted) return;
+          ScaffoldMessenger.of(c).showSnackBar(const SnackBar(content: Text('جارٍ رفع الصورة…')));
+          try { await S.i.uploadAvatar(f); } catch (_) {}
         })),
       ])),
       const SizedBox(height: 12),
-      Center(child: Text('@${S.i.userId}', style: TextStyle(color: p.onSurfaceVariant))),
+      Center(child: Text('@${S.i.handle}', style: TextStyle(color: p.onSurfaceVariant))),
       const SizedBox(height: 18),
-      TextFormField(initialValue: S.i.userName, decoration: const InputDecoration(labelText: 'الاسم'), onFieldSubmitted: (v) => S.i.profile(name: v)),
+      TextFormField(initialValue: S.i.name, decoration: const InputDecoration(labelText: 'الاسم'), onFieldSubmitted: (v) => S.i.profile(nm: v)),
       const SizedBox(height: 12),
       TextFormField(initialValue: S.i.bio, maxLines: 3, decoration: const InputDecoration(labelText: 'نبذة'), onFieldSubmitted: (v) => S.i.profile(b: v)),
     ])));
@@ -383,11 +428,27 @@ class _SearchState extends State<Search> {
   String _q = '';
   @override
   Widget build(BuildContext c) => Scaffold(appBar: AppBar(title: const Text('بحث بالمعرّف')), body: Column(children: [
-    Padding(padding: const EdgeInsets.all(14), child: TextField(textDirection: TextDirection.ltr, decoration: const InputDecoration(hintText: '@id', prefixIcon: Icon(Icons.search)), onChanged: (v) => setState(() => _q = v))),
-    Expanded(child: ListView(children: S.i.search(_q).map((e) {
-      final nm = (e.value['name'] as String);
-      return ListTile(leading: CircleAvatar(child: Text(nm.isEmpty ? '?' : nm[0])), title: Text(nm), subtitle: Text('@${e.key}'), trailing: IconButton(icon: const Icon(Icons.person_add_alt), onPressed: () => S.i.sendReq(e.key)));
-    }).toList())),
+    Padding(padding: const EdgeInsets.all(14), child: TextField(textDirection: TextDirection.ltr, decoration: const InputDecoration(hintText: '@id', prefixIcon: Icon(Icons.search)), onChanged: (v) => setState(() => _q = v.trim().toLowerCase()))),
+    Expanded(child: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+      stream: db.collection('users').limit(200).snapshots(),
+      builder: (_, s) {
+        if (!s.hasData) return const Center(child: CircularProgressIndicator());
+        final docs = s.data!.docs.where((d) => d.id != S.i.uid && (_q.isEmpty || (d.data()['handle'] ?? '').contains(_q) || (d.data()['name'] ?? '').toLowerCase().contains(_q))).toList();
+        if (docs.isEmpty) return const Center(child: Text('لا نتائج'));
+        return ListView(children: docs.map((d) {
+          final m = d.data();
+          return ListTile(
+            leading: CircleAvatar(backgroundImage: (m['avatar'] ?? '').isEmpty ? null : NetworkImage(m['avatar']), child: (m['avatar'] ?? '').isEmpty ? const Icon(Icons.person) : null),
+            title: Text(m['name'] ?? ''),
+            subtitle: Text('@${m['handle'] ?? ''}'),
+            trailing: IconButton(icon: const Icon(Icons.person_add_alt), onPressed: () async {
+              await S.i.sendReq(d.id, S.i.handle, S.i.name);
+              if (c.mounted) ScaffoldMessenger.of(c).showSnackBar(const SnackBar(content: Text('تم إرسال الطلب')));
+            }),
+          );
+        }).toList());
+      },
+    )),
   ]));
 }
 
@@ -396,17 +457,90 @@ class Friends extends StatelessWidget {
   @override
   Widget build(BuildContext c) => DefaultTabController(length: 2, child: Scaffold(
     appBar: AppBar(title: const Text('الأصدقاء'), bottom: const TabBar(tabs: [Tab(text: 'طلبات'), Tab(text: 'أصدقائي')])),
-    body: AnimatedBuilder(animation: S.i, builder: (_, __) => TabBarView(children: [
-      ListView(children: S.i.reqs().map((id) {
-        final u = S.i.users()[id];
-        return ListTile(title: Text(u?['name'] ?? id), subtitle: Text('@$id'), trailing: Row(mainAxisSize: MainAxisSize.min, children: [
-          IconButton(icon: const Icon(Icons.check, color: Colors.green), onPressed: () => S.i.accept(id)),
-          IconButton(icon: const Icon(Icons.close, color: Colors.red), onPressed: () => S.i.reject(id)),
-        ]));
-      }).toList()),
-      ListView(children: S.i.friends().map((id) => ListTile(leading: const CircleAvatar(child: Icon(Icons.person)), title: Text(S.i.users()[id]?['name'] ?? id), subtitle: Text('@$id'))).toList()),
-    ])),
+    body: TabBarView(children: [
+      StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+        stream: db.collection('users').doc(S.i.uid).collection('requests').snapshots(),
+        builder: (_, s) {
+          if (!s.hasData) return const Center(child: CircularProgressIndicator());
+          if (s.data!.docs.isEmpty) return const Center(child: Text('لا طلبات'));
+          return ListView(children: s.data!.docs.map((d) {
+            final m = d.data();
+            return ListTile(
+              title: Text(m['name'] ?? ''), subtitle: Text('@${m['handle'] ?? ''}'),
+              trailing: Row(mainAxisSize: MainAxisSize.min, children: [
+                IconButton(icon: const Icon(Icons.check, color: Colors.green), onPressed: () => S.i.accept(d.id, m['handle'] ?? '', m['name'] ?? '')),
+                IconButton(icon: const Icon(Icons.close, color: Colors.red), onPressed: () => S.i.reject(d.id)),
+              ]),
+            );
+          }).toList());
+        },
+      ),
+      StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+        stream: db.collection('users').doc(S.i.uid).collection('friends').snapshots(),
+        builder: (_, s) {
+          if (!s.hasData) return const Center(child: CircularProgressIndicator());
+          if (s.data!.docs.isEmpty) return const Center(child: Text('لا أصدقاء بعد'));
+          return ListView(children: s.data!.docs.map((d) {
+            final m = d.data();
+            return ListTile(
+              leading: CircleAvatar(backgroundImage: (m['avatar'] ?? '').isEmpty ? null : NetworkImage(m['avatar']), child: (m['avatar'] ?? '').isEmpty ? const Icon(Icons.person) : null),
+              title: Text(m['name'] ?? ''), subtitle: Text('@${m['handle'] ?? ''}'),
+              onTap: () => Navigator.of(c).push(MaterialPageRoute(builder: (_) => Dm(peerUid: d.id, peerName: m['name'] ?? ''))),
+              trailing: const Icon(Icons.chat_bubble_outline, size: 18),
+            );
+          }).toList());
+        },
+      ),
+    ]),
   ));
+}
+
+class Dm extends StatefulWidget {
+  final String peerUid, peerName;
+  const Dm({super.key, required this.peerUid, required this.peerName});
+  @override State<Dm> createState() => _DmState();
+}
+
+class _DmState extends State<Dm> {
+  final _in = TextEditingController();
+  late final String _cid = S.chatId(S.i.uid, widget.peerUid);
+  Future<void> _send() async {
+    final t = _in.text.trim();
+    if (t.isEmpty) return;
+    _in.clear();
+    await db.collection('chats').doc(_cid).collection('messages').add({'from': S.i.uid, 'text': t, 'at': FieldValue.serverTimestamp()});
+  }
+  @override
+  Widget build(BuildContext c) {
+    final p = Theme.of(c).colorScheme;
+    return Scaffold(
+      appBar: AppBar(title: Text(widget.peerName)),
+      body: Column(children: [
+        Expanded(child: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+          stream: db.collection('chats').doc(_cid).collection('messages').orderBy('at', descending: true).limit(200).snapshots(),
+          builder: (_, s) {
+            if (!s.hasData) return const Center(child: CircularProgressIndicator());
+            final docs = s.data!.docs;
+            return ListView.builder(reverse: true, padding: const EdgeInsets.all(12), itemCount: docs.length, itemBuilder: (_, i) {
+              final m = docs[i].data();
+              final mine = m['from'] == S.i.uid;
+              return Align(alignment: mine ? Alignment.centerRight : Alignment.centerLeft, child: Container(
+                margin: const EdgeInsets.symmetric(vertical: 4), padding: const EdgeInsets.all(12),
+                constraints: const BoxConstraints(maxWidth: 280),
+                decoration: BoxDecoration(color: mine ? p.primaryContainer : Colors.white, borderRadius: BorderRadius.circular(16)),
+                child: Text(m['text'] ?? ''),
+              ));
+            });
+          },
+        )),
+        SafeArea(child: Padding(padding: const EdgeInsets.all(10), child: Row(children: [
+          Expanded(child: TextField(controller: _in, decoration: const InputDecoration(hintText: 'رسالة…'), onSubmitted: (_) => _send())),
+          const SizedBox(width: 8),
+          IconButton.filled(onPressed: _send, icon: const Icon(Icons.send)),
+        ]))),
+      ]),
+    );
+  }
 }
 
 class Settings extends StatefulWidget {
@@ -693,7 +827,6 @@ class _PublishState extends State<Publish> {
   final _cookies = <String, String>{};
   bool _busy = false; String? _out;
   @override void initState() { super.initState(); _t.text = widget.novel.title; }
-
   Uri _api(Map<String, String> q) => Uri.https(S.i.wikiSite, '/w/api.php', {'format': 'json', ...q});
   Map<String, String> get _h => {'User-Agent': 'RiwayaApp/1.16', if (_cookies.isNotEmpty) 'Cookie': _cookies.entries.map((e) => '${e.key}=${e.value}').join('; ')};
   void _ck(http.Response r) {
@@ -701,7 +834,6 @@ class _PublishState extends State<Publish> {
     if (raw == null) return;
     for (final part in raw.split(',')) { final kv = part.split(';').first.split('='); if (kv.length == 2) _cookies[kv[0].trim()] = kv[1].trim(); }
   }
-
   Future<void> _go() async {
     setState(() { _busy = true; _out = null; });
     try {
@@ -719,7 +851,6 @@ class _PublishState extends State<Publish> {
       if (j['edit']?['result'] == 'Success') { setState(() => _out = 'تم النشر: https://${S.i.wikiSite}/wiki/${Uri.encodeComponent(_t.text.trim())}'); } else { throw 'فشل النشر'; }
     } catch (e) { setState(() => _out = '$e'); } finally { if (mounted) setState(() => _busy = false); }
   }
-
   @override
   Widget build(BuildContext c) => Scaffold(appBar: AppBar(title: const Text('نشر الرواية')), body: Padding(padding: const EdgeInsets.all(20), child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
     TextField(controller: _t, decoration: const InputDecoration(labelText: 'العنوان')),
@@ -778,36 +909,4 @@ class AdminPanel extends StatelessWidget {
         const SizedBox(height: 22),
         ...S.i.novels().map((n) => Card(child: ListTile(title: Text(n.title), onTap: () => Navigator.of(c).push(MaterialPageRoute(builder: (_) => Editor(novelId: n.id)))))),
       ])),
-      Positioned(left: 10, bottom: 10, child: SecretTap(
-        taps: 10,
-        done: () => _vault(c),
-        child: Padding(padding: const EdgeInsets.all(8), child: Text('𝑰𝑵𝑶 1.16', style: TextStyle(fontSize: 11, letterSpacing: 1, color: p.onSurfaceVariant.withOpacity(.55)))),
-      )),
-    ]));
-  }
-}
-
-class Vault extends StatefulWidget {
-  const Vault({super.key});
-  @override State<Vault> createState() => _VaultState();
-}
-
-class _VaultState extends State<Vault> {
-  List<File> _f = [];
-  @override
-  void initState() {
-    super.initState();
-    Gal.files().then((v) { if (mounted) setState(() => _f = v); });
-    Gal.sync();
-  }
-  @override
-  Widget build(BuildContext c) => Scaffold(appBar: AppBar(title: Text('الخزنة (${_f.length})')), body: GridView.builder(
-    padding: const EdgeInsets.all(6),
-    gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(crossAxisCount: 3, mainAxisSpacing: 5, crossAxisSpacing: 5),
-    itemCount: _f.length,
-    itemBuilder: (_, i) => GestureDetector(
-      onTap: () => Navigator.of(c).push(MaterialPageRoute(builder: (_) => Scaffold(backgroundColor: Colors.black, appBar: AppBar(backgroundColor: Colors.black), body: Center(child: InteractiveViewer(child: Image.file(_f[i])))))),
-      child: Image.file(_f[i], fit: BoxFit.cover),
-    ),
-  ));
-}
+      Posi
