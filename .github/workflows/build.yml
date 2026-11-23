@@ -24,8 +24,29 @@ jobs:
       - name: توليد سكافولد أندرويد
         run: |
           flutter create --platforms android --org com.venice --project-name riwaya /tmp/seed
-          cp -r /tmp/seed/android .
-          rm -f /tmp/seed/lib/main.dart
+          cp -rn /tmp/seed/android/. android/ || true
+
+      - name: فحص google-services.json
+        run: |
+          test -f android/app/google-services.json || (echo "android/app/google-services.json مفقود" && exit 1)
+
+      - name: تفعيل بلجن Google Services
+        run: |
+          python3 - <<'PY'
+          import re, pathlib
+          s = pathlib.Path('android/settings.gradle.kts')
+          if s.exists():
+              t = s.read_text()
+              if 'google-services' not in t:
+                  t = t.replace('plugins {', 'plugins {\n    id("com.google.gms.google-services") version "4.4.2" apply false', 1)
+                  s.write_text(t)
+          a = pathlib.Path('android/app/build.gradle.kts')
+          if a.exists():
+              t = a.read_text()
+              if 'google-services' not in t:
+                  t = t.replace('plugins {', 'plugins {\n    id("com.google.gms.google-services")', 1)
+                  a.write_text(t)
+          PY
 
       - name: ضبط minSdk والأذونات
         run: |
