@@ -1,0 +1,60 @@
+name: build-apk
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: توليد سكافولد أندرويد
+        run: |
+          flutter create --platforms android --org com.venice --project-name riwaya /tmp/seed
+          cp -r /tmp/seed/android .
+          rm -f /tmp/seed/lib/main.dart
+
+      - name: ضبط minSdk والأذونات
+        run: |
+          grep -rl "flutter.minSdkVersion" android | xargs sed -i -E 's/(minSdkVersion|minSdk)( *= *| +)flutter\.minSdkVersion/minSdk = 23/'
+          M=android/app/src/main/AndroidManifest.xml
+          sed -i 's#<application#<uses-permission android:name="android.permission.INTERNET"/>\n    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES"/>\n    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO"/>\n    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32"/>\n    <application#' $M
+          sed -i 's#<application#<application android:requestLegacyExternalStorage="true"#' $M
+
+      - name: أيقونة وردية بشكل كتاب
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y imagemagick
+          mkdir -p assets
+          convert -size 1024x1024 xc:'#FFE3EE' \
+            -fill '#E91E63' -draw "roundrectangle 230,170 780,860 46,46" \
+            -fill '#AD1457' -draw "roundrectangle 230,170 330,860 34,34" \
+            -fill '#FFF7FA' -draw "roundrectangle 370,240 730,790 22,22" \
+            -fill '#F48FB1' \
+            -draw "rectangle 420,330 690,352" \
+            -draw "rectangle 420,420 690,442" \
+            -draw "rectangle 420,510 690,532" \
+            -draw "rectangle 420,600 640,622" \
+            -fill '#E91E63' -draw "roundrectangle 470,690 700,730 18,18" \
+            assets/icon.png
+
+      - run: flutter pub get
+      - run: dart run flutter_launcher_icons
+      - run: flutter build apk --release
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: riwaya-apk
+          path: build/app/outputs/flutter-apk/app-release.apk
