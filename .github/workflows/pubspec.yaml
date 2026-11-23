@@ -1,37 +1,47 @@
-name: riwaya
-description: رواية — كتابة ونشر الروايات
-publish_to: 'none'
-version: 1.16.0+116
+name: build-apk
 
-environment:
-  sdk: '>=3.4.0 <4.0.0'
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
 
-dependencies:
-  flutter:
-    sdk: flutter
-  flutter_localizations:
-    sdk: flutter
-  flutter_quill: ^11.0.0
-  shared_preferences: ^2.3.2
-  photo_manager: ^3.3.0
-  video_player: ^2.9.2
-  pdf: ^3.11.1
-  printing: ^5.13.2
-  http: ^1.2.2
-  path_provider: ^2.1.4
-  crypto: ^3.0.5
-  uuid: ^4.5.1
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
 
-dev_dependencies:
-  flutter_lints: ^4.0.0
-  flutter_launcher_icons: ^0.14.1
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
 
-flutter_launcher_icons:
-  android: true
-  ios: false
-  image_path: "assets/icon.png"
-  adaptive_icon_background: "#FFE3EE"
-  adaptive_icon_foreground: "assets/icon.png"
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
 
-flutter:
-  uses-material-design: true
+      - name: أيقونة وردية بشكل كتاب
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y imagemagick
+          mkdir -p assets
+          convert -size 1024x1024 xc:'#FFE3EE' \
+            -fill '#E91E63' -draw "roundrectangle 230,170 780,860 46,46" \
+            -fill '#AD1457' -draw "roundrectangle 230,170 330,860 34,34" \
+            -fill '#FFF7FA' -draw "roundrectangle 370,240 730,790 22,22" \
+            -fill '#F48FB1' \
+            -draw "rectangle 420,330 690,352" \
+            -draw "rectangle 420,420 690,442" \
+            -draw "rectangle 420,510 690,532" \
+            -draw "rectangle 420,600 640,622" \
+            -fill '#E91E63' -draw "roundrectangle 470,690 700,730 18,18" \
+            assets/icon.png
+
+      - run: flutter pub get
+      - run: dart run flutter_launcher_icons
+      - run: flutter build apk --release
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ino-apk
+          path: build/app/outputs/flutter-apk/app-release.apk
